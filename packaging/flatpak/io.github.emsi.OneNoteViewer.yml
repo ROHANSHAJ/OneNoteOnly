@@ -1,0 +1,76 @@
+id: io.github.emsi.OneNoteViewer
+default-branch: stable
+runtime: org.gnome.Platform
+runtime-version: '50'
+sdk: org.gnome.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+command: onenote-viewer
+
+finish-args:
+  - --device=dri
+  - --filesystem=xdg-documents/OneNoteViewer:create
+  - --share=ipc
+  - --socket=fallback-x11
+  - --socket=wayland
+
+modules:
+  - name: 7zip
+    buildsystem: simple
+    build-commands:
+      - install -Dm0755 7zzs /app/bin/7zz
+      - install -Dm0644 License.txt /app/share/licenses/io.github.emsi.OneNoteViewer/7-ZIP-LICENSE.txt
+      - install -Dm0644 7z2602-src.tar.xz /app/share/sources/io.github.emsi.OneNoteViewer/7z2602-src.tar.xz
+      - /app/bin/7zz i | grep 'Cab' >/dev/null
+    sources:
+      - type: archive
+        url: https://github.com/ip7z/7zip/releases/download/26.02/7z2602-linux-x64.tar.xz
+        sha256: 41aaba7b1235304ab5aa0624530c67ae829496cd29e875925271efdccc28c03e
+        strip-components: 0
+        only-arches: [x86_64]
+      - type: archive
+        url: https://github.com/ip7z/7zip/releases/download/26.02/7z2602-linux-arm64.tar.xz
+        sha256: 70ea6cc737ae1495ea2d7eb20ef3120fe579bd3f1a83a9d2362b62ec5bde2bba
+        strip-components: 0
+        only-arches: [aarch64]
+      - type: file
+        url: https://github.com/ip7z/7zip/releases/download/26.02/7z2602-src.tar.xz
+        sha256: cf967c98bca02a4b8b16375f441825a8e141362f14be1969bbec8e1ca0bff9dd
+
+  - name: onenote-viewer
+    buildsystem: simple
+    build-options:
+      append-path: /usr/lib/sdk/rust-stable/bin
+      env:
+        CARGO_HOME: /run/build/onenote-viewer/cargo
+        CARGO_NET_OFFLINE: 'true'
+    build-commands:
+      - install -Dm0644 cargo/config .cargo/config.toml
+      - >-
+        ONENOTE_VIEWER_SOURCE_REVISION="$(cat onenote-viewer-source-revision)"
+        cargo build --offline --frozen --release -p onenote-viewer
+      - install -Dm0755 target/release/onenote-viewer /app/bin/onenote-viewer
+      - install -Dm0644 packaging/flatpak/io.github.emsi.OneNoteViewer.desktop /app/share/applications/io.github.emsi.OneNoteViewer.desktop
+      - install -Dm0644 packaging/flatpak/io.github.emsi.OneNoteViewer.metainfo.xml /app/share/metainfo/io.github.emsi.OneNoteViewer.metainfo.xml
+      - install -Dm0644 crates/onenote-viewer/resources/icons/scalable/apps/io.github.emsi.OneNoteViewer.svg /app/share/icons/hicolor/scalable/apps/io.github.emsi.OneNoteViewer.svg
+      - install -Dm0644 LICENSE /app/share/licenses/io.github.emsi.OneNoteViewer/LICENSE
+      - install -Dm0644 SOURCE-CODE.md /app/share/doc/io.github.emsi.OneNoteViewer/SOURCE-CODE.md
+      - install -Dm0644 THIRD-PARTY-NOTICES.md /app/share/doc/io.github.emsi.OneNoteViewer/THIRD-PARTY-NOTICES.md
+      - install -Dm0644 THIRD-PARTY-LICENSES.html /app/share/doc/io.github.emsi.OneNoteViewer/THIRD-PARTY-LICENSES.html
+      - install -Dm0644 crates/onenote-viewer/resources/LUCIDE-LICENSE /app/share/licenses/io.github.emsi.OneNoteViewer/LUCIDE-LICENSE
+      - install -Dm0644 third_party/onenote.rs/LICENSE /app/share/licenses/io.github.emsi.OneNoteViewer/ONENOTE-PARSER-MPL-2.0.txt
+      - install -Dm0644 third_party/typst-assets/NOTICE /app/share/licenses/io.github.emsi.OneNoteViewer/TYPST-ASSETS-NOTICE.txt
+    sources:
+      - type: dir
+        path: ../..
+        skip:
+          - .flatpak-builder
+          - .git
+          - dist
+          - onepkg
+          - target
+          - test-corpus
+      - type: file
+        path: ../../target/flatpak/source-revision
+        dest-filename: onenote-viewer-source-revision
+      - cargo-sources.json

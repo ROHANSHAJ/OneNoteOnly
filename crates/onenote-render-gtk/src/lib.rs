@@ -1,0 +1,23 @@
+//! Embeddable GTK renderer for UI-neutral `OneNote` page scenes.
+
+#![forbid(unsafe_code)]
+
+mod canvas;
+mod find;
+mod image_cache;
+mod ink_edit;
+mod math_cache;
+mod resolved_layout;
+mod text;
+mod view;
+
+pub use canvas::{normalize_zoom, PageCanvas, DEFAULT_ZOOM, MAX_ZOOM, MIN_ZOOM};
+pub use find::{find_text_ranges, FindMatch, FindOptions, FindTextRange};
+pub use ink_edit::{
+    EditableImage, EditableStroke, EditableTextBox, ErasedStroke, InkEditDocument, InkEditTool,
+};
+pub use math_cache::TypstMathBackend;
+pub use view::PageView;
+
+/// The crate API version during the pre-1.0 implementation phase.
+pub const API_VERSION: u32 = onenote_render::API_VERSION;

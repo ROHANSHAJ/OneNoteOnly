@@ -1,0 +1,137 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Copyright 2026 Mariusz Woloszyn -->
+<component type="desktop-application">
+  <id>io.github.emsi.OneNoteViewer</id>
+  <name>OneNote Viewer</name>
+  <summary>View and search local Microsoft OneNote notebooks</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+  <developer id="io.github.emsi">
+    <name>Mariusz Woloszyn</name>
+  </developer>
+  <description>
+    <p>
+      OneNote Viewer is a native Linux application for opening, rendering,
+      indexing, and searching local Microsoft OneNote notebooks while
+      preserving their freeform page layout. It can layer local ink and text
+      edits over a page without modifying the original OneNote section.
+    </p>
+    <p>
+      It opens native OneNote sections, notebook directories, and OneNote
+      package exports without converting pages to HTML or Markdown.
+    </p>
+  </description>
+  <launchable type="desktop-id">io.github.emsi.OneNoteViewer.desktop</launchable>
+  <provides>
+    <binary>onenote-viewer</binary>
+  </provides>
+  <url type="homepage">https://github.com/emsi/OneNoteViewer</url>
+  <url type="bugtracker">https://github.com/emsi/OneNoteViewer/issues</url>
+  <url type="vcs-browser">https://github.com/emsi/OneNoteViewer</url>
+  <supports>
+    <control>keyboard</control>
+    <control>pointing</control>
+  </supports>
+  <requires>
+    <display_length compare="ge">768</display_length>
+  </requires>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="0.4.0" date="2026-10-15">
+      <description>
+        <p>
+          Add experimental/beta ARM64 (aarch64) Flatpak and AppImage packages
+          alongside the existing x86-64 releases. Both architectures run native
+          build, test, and packaged application checks before publication.
+        </p>
+      </description>
+      <url type="details">https://github.com/emsi/OneNoteViewer/releases/tag/v0.4.0</url>
+    </release>
+    <release version="0.3.1" date="2026-09-03">
+      <description>
+        <p>
+          Improve compatibility with OneNote files containing additional
+          revision metadata, preserve wide inline image proportions, and keep
+          table and attachment layout stable when images are resized.
+        </p>
+      </description>
+      <url type="details">https://github.com/emsi/OneNoteViewer/releases/tag/v0.3.1</url>
+    </release>
+    <release version="0.3.0" date="2026-08-17">
+      <description>
+        <p>
+          Open manifest-free OneNote backup folders as reconstructed notebooks
+          with nested section groups, deterministic snapshot selection, manual
+          refresh, and searchable content. This release also reuses unchanged
+          search indexes and restores notebook expansion and pane layout.
+        </p>
+      </description>
+      <url type="details">https://github.com/emsi/OneNoteViewer/releases/tag/v0.3.0</url>
+    </release>
+    <release version="0.2.0" date="2026-08-10">
+      <description>
+        <p>
+          Add scoped workspace search with complete result paths, a compact
+          Find in Page bar with Unicode-aware matching options, and Back and
+          Forward navigation across notebooks, links, and search results.
+        </p>
+      </description>
+      <url type="details">https://github.com/emsi/OneNoteViewer/releases/tag/v0.2.0</url>
+    </release>
+    <release version="0.1.5" date="2026-08-08">
+      <description>
+        <p>
+          Restore the last opened page across restarts, make page headers
+          selectable, and add safe attachment open and save actions. Stored
+          previews and file-type icons now improve embedded-file fidelity.
+        </p>
+      </description>
+      <url type="details">https://github.com/emsi/OneNoteViewer/releases/tag/v0.1.5</url>
+    </release>
+    <release version="0.1.4" date="2026-08-07">
+      <description>
+        <p>
+          Improve page fidelity by retaining complete equation ink, reflowing
+          text and mathematics from measured heights, and rendering newly
+          visible content reliably while scrolling long pages.
+        </p>
+      </description>
+      <url type="details">https://github.com/emsi/OneNoteViewer/releases/tag/v0.1.4</url>
+    </release>
+    <release version="0.1.3" date="2026-08-05">
+      <description>
+        <p>
+          Activate explicit OneNote hyperlinks and optionally recognize plain
+          visible links. This release also restores revisioned list content,
+          corrects rich-text line breaks, and persists synchronized page zoom.
+        </p>
+      </description>
+      <url type="details">https://github.com/emsi/OneNoteViewer/releases/tag/v0.1.3</url>
+    </release>
+    <release version="0.1.2" date="2026-08-03">
+      <description>
+        <p>
+          Display mathematical formulas with their original structure,
+          including fractions, roots, scripts, matrices, and large operators.
+          This release also improves navigation selection and page timestamps.
+        </p>
+      </description>
+      <url type="details">https://github.com/emsi/OneNoteViewer/releases/tag/v0.1.2</url>
+    </release>
+    <release version="0.1.1" date="2026-07-29">
+      <description>
+        <p>
+          Correct Flatpak application metadata, stable-branch packaging, and
+          versioned release artifacts.
+        </p>
+      </description>
+      <url type="details">https://github.com/emsi/OneNoteViewer/releases/tag/v0.1.1</url>
+    </release>
+    <release version="0.1.0" date="2026-07-29">
+      <description>
+        <p>Initial public preview release.</p>
+      </description>
+      <url type="details">https://github.com/emsi/OneNoteViewer/releases/tag/v0.1.0</url>
+    </release>
+  </releases>
+</component>

@@ -1,0 +1,63 @@
+[workspace]
+members = [
+    "crates/onenote-core",
+    "crates/onenote-index",
+    "crates/onenote-render",
+    "crates/onenote-render-gtk",
+    "crates/onenote-viewer",
+]
+exclude = ["third_party/onenote.rs", "third_party/onenote-parser-v2"]
+resolver = "2"
+
+[workspace.package]
+version = "0.4.0"
+edition = "2021"
+rust-version = "1.85"
+authors = ["Mariusz Woloszyn"]
+repository = "https://github.com/emsi/OneNoteViewer"
+license = "GPL-3.0-or-later"
+
+[workspace.dependencies]
+anyhow = "1.0.98"
+blake3 = "1.8.2"
+gtk = { package = "gtk4", version = "0.9.6", features = ["v4_6"] }
+glib-build-tools = "0.20.0"
+image = { version = "=0.25.8", default-features = false, features = ["bmp", "gif", "jpeg", "png", "tiff", "webp"] }
+linkify = "0.11.0"
+num-traits = "0.2.19"
+onenote-core = { path = "crates/onenote-core" }
+onenote-index = { path = "crates/onenote-index" }
+onenote-render = { path = "crates/onenote-render" }
+onenote-render-gtk = { path = "crates/onenote-render-gtk" }
+onenote_parser = { git = "https://github.com/emsi/onenote.rs", rev = "77cf881df7579eb58972e3db8ce0ca34d25a7f62" }
+rusqlite = { version = "0.32.1", features = ["bundled"] }
+sanitize-filename = "0.6.0"
+serde = { version = "1.0.219", features = ["derive", "rc"] }
+serde_json = "1.0.140"
+tempfile = "3.19.1"
+thiserror = "2.0.12"
+typed-path = "0.12.3"
+typst = "=0.12.0"
+typst-as-lib = "=0.11.1"
+typst-assets = { version = "=0.12.0", features = ["fonts"] }
+typst-render = "=0.12.0"
+unicode-normalization = "0.1.24"
+uuid = { version = "1.16.0", features = ["serde", "v4", "v5"] }
+
+[patch."https://github.com/emsi/onenote.rs"]
+onenote_parser = { path = "third_party/onenote-parser-v2/crates/parser" }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+unused_must_use = "deny"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+
+[profile.release]
+codegen-units = 16
+lto = false
+strip = "symbols"
