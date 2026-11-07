@@ -11,6 +11,7 @@ mod navigation;
 mod navigation_history;
 mod navigation_state;
 mod settings;
+mod templates;
 #[cfg(test)]
 mod test_support;
 mod word_editor;

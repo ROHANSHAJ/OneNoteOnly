@@ -25,7 +25,7 @@ use onenote_render_gtk::{
 use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc};
@@ -889,6 +889,8 @@ impl Viewer {
         brand.add_css_class("brand");
 
         let file_menu = gio::Menu::new();
+        file_menu.append(Some("📚 New Notebook... (Ctrl+Shift+N)"), Some("win.new-notebook"));
+        file_menu.append(Some("📑 New Section... (Ctrl+Alt+N)"), Some("win.new-section"));
         file_menu.append(Some("📄 New Page (Ctrl+N)"), Some("win.new-page"));
         file_menu.append(Some("Open OneNote File..."), Some("win.open-file"));
         file_menu.append(Some("Open Notebook Folder..."), Some("win.open-folder"));
@@ -941,11 +943,24 @@ impl Viewer {
         header.set_title_widget(Some(&workspace_search));
         header.pack_end(&menu);
 
+        let notebook_actions = gtk::Box::new(gtk::Orientation::Horizontal, 2);
+        let add_notebook_btn = icon_button("folder-new-symbolic", "New Notebook (Ctrl+Shift+N)");
+        add_notebook_btn.set_action_name(Some("win.new-notebook"));
+        add_notebook_btn.add_css_class("flat");
+
+        let add_section_btn = icon_button("document-new-symbolic", "New Section (Ctrl+Alt+N)");
+        add_section_btn.set_action_name(Some("win.new-section"));
+        add_section_btn.add_css_class("flat");
+
+        notebook_actions.append(&add_notebook_btn);
+        notebook_actions.append(&add_section_btn);
+        notebook_actions.append(&close_source);
+
         let notebooks = CollapsibleNavigationBand::new(
             "NOTEBOOKS",
             &notebook_tree.view,
             NOTEBOOK_NAVIGATION_WIDTH,
-            Some(&close_source),
+            Some(notebook_actions.upcast_ref()),
             restored_panes.notebooks_collapsed,
         );
         let add_page_btn = icon_button("list-add-symbolic", "Add New Page (Ctrl+N)");
@@ -955,7 +970,7 @@ impl Viewer {
             "PAGES",
             &page_list,
             PAGE_NAVIGATION_WIDTH,
-            Some(&add_page_btn),
+            Some(add_page_btn.upcast_ref()),
             restored_panes.pages_collapsed,
         );
         let results = navigation_band("SEARCH RESULTS", &result_list, SEARCH_RESULTS_WIDTH);
@@ -1317,6 +1332,24 @@ impl Viewer {
             }
         });
         viewer.window.add_action(&new_page_action);
+
+        let new_notebook_action = gio::SimpleAction::new("new-notebook", None);
+        let weak_new_notebook = Rc::downgrade(&viewer);
+        new_notebook_action.connect_activate(move |_, _| {
+            if let Some(viewer) = weak_new_notebook.upgrade() {
+                viewer.show_new_notebook_dialog();
+            }
+        });
+        viewer.window.add_action(&new_notebook_action);
+
+        let new_section_action = gio::SimpleAction::new("new-section", None);
+        let weak_new_section = Rc::downgrade(&viewer);
+        new_section_action.connect_activate(move |_, _| {
+            if let Some(viewer) = weak_new_section.upgrade() {
+                viewer.show_new_section_dialog();
+            }
+        });
+        viewer.window.add_action(&new_section_action);
         viewer.window.add_action(&open_folder);
         viewer.window.add_action(&open_backup_folder);
         viewer.window.add_action(&import_package);
@@ -1333,6 +1366,8 @@ impl Viewer {
         viewer.window.add_action(&page_find_previous_action);
         application.set_accels_for_action("win.open-file", &["<Primary>o"]);
         application.set_accels_for_action("win.new-page", &["<Primary>n"]);
+        application.set_accels_for_action("win.new-notebook", &["<Primary><Shift>n"]);
+        application.set_accels_for_action("win.new-section", &["<Primary><Alt>n", "<Primary><Shift>s"]);
         application.set_accels_for_action("win.open-folder", &["<Primary><Shift>o"]);
         application.set_accels_for_action("win.import-package", &["<Primary><Shift>i"]);
         application.set_accels_for_action("win.settings", &["<Primary>comma"]);
@@ -1928,6 +1963,158 @@ impl Viewer {
         self.page_view.canvas().select_node_by_id(&title_node_id, "Untitled Page".len());
         self.page_view.canvas().grab_focus();
         self.word_editor.load_text(title_node_id, "Untitled Page".to_string());
+    }
+
+    fn active_notebook_directory(&self) -> Option<PathBuf> {
+        let state = self.state.borrow();
+        let active = state.active.as_ref()?;
+        let source = state
+            .sources
+            .iter()
+            .find(|source| source.loaded.notebook.source_id == active.source)?;
+        let path = source.descriptor.path();
+        if path.is_dir() {
+            Some(path.to_path_buf())
+        } else if let Some(parent) = path.parent() {
+            Some(parent.to_path_buf())
+        } else {
+            None
+        }
+    }
+
+    pub fn show_new_notebook_dialog(self: &Rc<Self>) {
+        let default_location = self
+            .active_notebook_directory()
+            .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+            .unwrap_or_else(|| self.settings.borrow().notebooks_location.clone());
+
+        let weak_create = Rc::downgrade(self);
+        let weak_err = Rc::downgrade(self);
+        crate::dialogs::present_new_notebook(
+            &self.window,
+            default_location,
+            move |name, folder| {
+                if let Some(viewer) = weak_create.upgrade() {
+                    viewer.create_notebook(name, folder)
+                } else {
+                    false
+                }
+            },
+            move |title, detail| {
+                if let Some(viewer) = weak_err.upgrade() {
+                    viewer.show_error(title, detail);
+                }
+            },
+        );
+    }
+
+    pub fn show_new_section_dialog(self: &Rc<Self>) {
+        let default_location = self
+            .active_notebook_directory()
+            .unwrap_or_else(|| self.settings.borrow().notebooks_location.clone());
+
+        let weak_create = Rc::downgrade(self);
+        let weak_err = Rc::downgrade(self);
+        crate::dialogs::present_new_section(
+            &self.window,
+            default_location,
+            move |name, folder| {
+                if let Some(viewer) = weak_create.upgrade() {
+                    viewer.create_section(name, folder)
+                } else {
+                    false
+                }
+            },
+            move |title, detail| {
+                if let Some(viewer) = weak_err.upgrade() {
+                    viewer.show_error(title, detail);
+                }
+            },
+        );
+    }
+
+    fn create_notebook(self: &Rc<Self>, name: &str, parent_folder: &Path) -> bool {
+        let notebook_dir = parent_folder.join(name.trim());
+        if notebook_dir.exists() {
+            self.show_error(
+                "Notebook Already Exists",
+                &format!("A folder named '{}' already exists in {}.", name, parent_folder.display()),
+            );
+            return false;
+        }
+
+        if let Err(e) = std::fs::create_dir_all(&notebook_dir) {
+            self.show_error(
+                "Could Not Create Notebook Folder",
+                &format!("Failed to create directory {}: {}", notebook_dir.display(), e),
+            );
+            return false;
+        }
+
+        let toc_file = notebook_dir.join("Open Notebook.onetoc2");
+        if let Err(e) = std::fs::write(&toc_file, crate::templates::TEMPLATE_ONETOC2) {
+            self.show_error(
+                "Could Not Initialize Notebook",
+                &format!("Failed to write Open Notebook.onetoc2: {}", e),
+            );
+            return false;
+        }
+
+        let section_file = notebook_dir.join("Quick Notes.one");
+        if let Err(e) = std::fs::write(&section_file, crate::templates::TEMPLATE_SECTION_ONE) {
+            self.show_error(
+                "Could Not Create Initial Section",
+                &format!("Failed to write Quick Notes.one: {}", e),
+            );
+            return false;
+        }
+
+        self.status.set_label(&format!("Notebook '{}' created", name));
+        self.discover(notebook_dir);
+        true
+    }
+
+    fn create_section(self: &Rc<Self>, name: &str, notebook_folder: &Path) -> bool {
+        let file_name = if name.ends_with(".one") {
+            name.to_string()
+        } else {
+            format!("{}.one", name)
+        };
+        let section_path = notebook_folder.join(&file_name);
+
+        if section_path.exists() {
+            self.show_error(
+                "Section Already Exists",
+                &format!("A section file named '{}' already exists in {}.", file_name, notebook_folder.display()),
+            );
+            return false;
+        }
+
+        if let Err(e) = std::fs::create_dir_all(notebook_folder) {
+            self.show_error(
+                "Could Not Prepare Folder",
+                &format!("Failed to prepare directory {}: {}", notebook_folder.display(), e),
+            );
+            return false;
+        }
+
+        if let Err(e) = std::fs::write(&section_path, crate::templates::TEMPLATE_SECTION_ONE) {
+            self.show_error(
+                "Could Not Create Section File",
+                &format!("Failed to write {}: {}", section_path.display(), e),
+            );
+            return false;
+        }
+
+        self.status.set_label(&format!("Section '{}' created", file_name));
+
+        let toc = notebook_folder.join("Open Notebook.onetoc2");
+        if toc.exists() {
+            self.discover(notebook_folder.to_path_buf());
+        } else {
+            self.load_source(SourceDescriptor::native(section_path), None);
+        }
+        true
     }
 
     fn active_ink_edit_key(&self) -> Option<String> {
@@ -4808,7 +4995,7 @@ struct CollapsibleNavigationBand {
     heading: gtk::Label,
     body: gtk::ScrolledWindow,
     toggle: gtk::Button,
-    header_action: Option<gtk::Button>,
+    header_action: Option<gtk::Widget>,
     expanded_width: i32,
     collapsed: Rc<Cell<bool>>,
 }
@@ -4818,7 +5005,7 @@ impl CollapsibleNavigationBand {
         title: &str,
         list: &gtk::ListView,
         expanded_width: i32,
-        header_action: Option<&gtk::Button>,
+        header_action: Option<&gtk::Widget>,
         collapsed: bool,
     ) -> Self {
         let heading = gtk::Label::builder()
@@ -5204,6 +5391,20 @@ fn build_ribbon_toolbar(
     let home_box = gtk::Box::new(gtk::Orientation::Horizontal, 4);
     home_box.add_css_class("ribbon-toolbar");
 
+    let new_nb_btn = gtk::Button::with_label("📚 New Notebook");
+    new_nb_btn.add_css_class("ribbon-btn");
+    new_nb_btn.add_css_class("word-tb-btn-primary");
+    new_nb_btn.set_tooltip_text(Some("Create a new OneNote notebook (Ctrl+Shift+N)"));
+    new_nb_btn.set_action_name(Some("win.new-notebook"));
+    home_box.append(&new_nb_btn);
+
+    let new_sec_btn = gtk::Button::with_label("📑 New Section");
+    new_sec_btn.add_css_class("ribbon-btn");
+    new_sec_btn.add_css_class("word-tb-btn-primary");
+    new_sec_btn.set_tooltip_text(Some("Create a new section sub-file (.one) (Ctrl+Alt+N)"));
+    new_sec_btn.set_action_name(Some("win.new-section"));
+    home_box.append(&new_sec_btn);
+
     let new_page_btn = gtk::Button::with_label("📄 New Page");
     new_page_btn.add_css_class("ribbon-btn");
     new_page_btn.add_css_class("word-tb-btn-primary");
@@ -5536,6 +5737,20 @@ fn build_ribbon_toolbar(
     // 3. Insert ribbon
     let insert_box = gtk::Box::new(gtk::Orientation::Horizontal, 6);
     insert_box.add_css_class("ribbon-toolbar");
+
+    let ins_nb_btn = gtk::Button::with_label("📚 New Notebook");
+    ins_nb_btn.add_css_class("ribbon-btn");
+    ins_nb_btn.add_css_class("word-tb-btn-primary");
+    ins_nb_btn.set_tooltip_text(Some("Insert a new OneNote notebook (Ctrl+Shift+N)"));
+    ins_nb_btn.set_action_name(Some("win.new-notebook"));
+    insert_box.append(&ins_nb_btn);
+
+    let ins_sec_btn = gtk::Button::with_label("📑 New Section");
+    ins_sec_btn.add_css_class("ribbon-btn");
+    ins_sec_btn.add_css_class("word-tb-btn-primary");
+    ins_sec_btn.set_tooltip_text(Some("Insert a new section sub-file (.one) (Ctrl+Alt+N)"));
+    ins_sec_btn.set_action_name(Some("win.new-section"));
+    insert_box.append(&ins_sec_btn);
 
     let ins_new_page_btn = gtk::Button::with_label("📄 New Page");
     ins_new_page_btn.add_css_class("ribbon-btn");
@@ -7063,7 +7278,7 @@ mod tests {
             "NOTEBOOKS",
             &notebook_list,
             NOTEBOOK_NAVIGATION_WIDTH,
-            Some(&close_source),
+            Some(close_source.upcast_ref()),
             false,
         );
         let pages =

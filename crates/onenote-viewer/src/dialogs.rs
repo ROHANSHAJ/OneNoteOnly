@@ -550,6 +550,286 @@ fn update_import_destination(
     import.set_sensitive(!exists);
 }
 
+pub(crate) fn present_new_notebook<F, E>(
+    parent_window: &gtk::ApplicationWindow,
+    default_location: PathBuf,
+    on_create: F,
+    on_error: E,
+) where
+    F: Fn(&str, &Path) -> bool + 'static,
+    E: Fn(&str, &str) + 'static,
+{
+    let candidate_location = Rc::new(RefCell::new(default_location.clone()));
+    let on_error: ErrorHandler = Rc::new(on_error);
+    let dialog = gtk::Window::builder()
+        .title("New OneNote Notebook")
+        .transient_for(parent_window)
+        .modal(true)
+        .resizable(false)
+        .default_width(560)
+        .build();
+    dialog.add_css_class("settings-dialog");
+
+    let content = dialog_content(16);
+    let heading = gtk::Label::builder()
+        .label("Create New Notebook")
+        .xalign(0.0)
+        .build();
+    heading.add_css_class("dialog-title");
+    content.append(&heading);
+
+    let desc = gtk::Label::builder()
+        .label("Creates a new Microsoft OneNote notebook folder with root Open Notebook.onetoc2 and an initial section.")
+        .xalign(0.0)
+        .wrap(true)
+        .build();
+    desc.add_css_class("dim-label");
+    content.append(&desc);
+
+    let name_label = gtk::Label::builder()
+        .label("Notebook Name:")
+        .xalign(0.0)
+        .build();
+    name_label.add_css_class("field-label");
+    content.append(&name_label);
+
+    let name_entry = gtk::Entry::builder()
+        .placeholder_text("e.g. My Project, Personal, Quick Notes")
+        .text("New Notebook")
+        .build();
+    content.append(&name_entry);
+
+    let loc_label = gtk::Label::builder()
+        .label("Folder Location:")
+        .xalign(0.0)
+        .build();
+    loc_label.add_css_class("field-label");
+    content.append(&loc_label);
+
+    let location_box = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let path_lbl = path_label(Some(&default_location));
+    path_lbl.set_hexpand(true);
+    let browse_btn = gtk::Button::with_label("Browse...");
+    browse_btn.add_css_class("icon-button");
+    location_box.append(&path_lbl);
+    location_box.append(&browse_btn);
+    content.append(&location_box);
+
+    let actions_box = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    actions_box.set_halign(gtk::Align::End);
+    actions_box.set_margin_top(12);
+
+    let cancel = gtk::Button::with_label("Cancel");
+    cancel.add_css_class("icon-button");
+    let create = gtk::Button::with_label("Create Notebook");
+    create.add_css_class("suggested-action");
+    create.add_css_class("icon-button");
+    actions_box.append(&cancel);
+    actions_box.append(&create);
+    content.append(&actions_box);
+
+    let dialog_on_cancel = dialog.clone();
+    cancel.connect_clicked(move |_| dialog_on_cancel.close());
+
+    let dialog_for_chooser = dialog.clone();
+    let candidate_for_chooser = Rc::clone(&candidate_location);
+    let path_for_chooser = path_lbl.clone();
+    let error_for_chooser = Rc::clone(&on_error);
+    let default_for_chooser = default_location.clone();
+    browse_btn.connect_clicked(move |button| {
+        let candidate = Rc::clone(&candidate_for_chooser);
+        let path_lbl = path_for_chooser.clone();
+        let on_error = Rc::clone(&error_for_chooser);
+        let preferred = candidate.borrow().clone();
+        select_folder(
+            FolderDialogRequest {
+                owner: &dialog_for_chooser,
+                trigger: button,
+                title: "Choose folder to create notebook in",
+                accept_label: "Select Folder",
+                preferred: &preferred,
+                fallback: &default_for_chooser,
+                error_title: "Could not select folder",
+            },
+            move |path| {
+                path_lbl.set_label(&path.display().to_string());
+                *candidate.borrow_mut() = path;
+            },
+            on_error,
+        );
+    });
+
+    let dialog_on_create = dialog.clone();
+    let candidate_for_create = Rc::clone(&candidate_location);
+    let name_for_create = name_entry.clone();
+    let error_for_create = Rc::clone(&on_error);
+    let create_action = Rc::new(move || {
+        let text = name_for_create.text().trim().to_string();
+        if text.is_empty() {
+            error_for_create("Invalid Notebook Name", "Please enter a valid notebook name.");
+            return;
+        }
+        if text.contains('/') || text.contains('\\') || text.contains('\0') {
+            error_for_create("Invalid Notebook Name", "Notebook name cannot contain '/', '\\', or null characters.");
+            return;
+        }
+        let folder = candidate_for_create.borrow().clone();
+        if on_create(&text, &folder) {
+            dialog_on_create.close();
+        }
+    });
+
+    let create_trigger = Rc::clone(&create_action);
+    create.connect_clicked(move |_| create_trigger());
+
+    let create_enter = Rc::clone(&create_action);
+    name_entry.connect_activate(move |_| create_enter());
+
+    dialog.set_child(Some(&content));
+    name_entry.grab_focus();
+    dialog.present();
+}
+
+pub(crate) fn present_new_section<F, E>(
+    parent_window: &gtk::ApplicationWindow,
+    default_location: PathBuf,
+    on_create: F,
+    on_error: E,
+) where
+    F: Fn(&str, &Path) -> bool + 'static,
+    E: Fn(&str, &str) + 'static,
+{
+    let candidate_location = Rc::new(RefCell::new(default_location.clone()));
+    let on_error: ErrorHandler = Rc::new(on_error);
+    let dialog = gtk::Window::builder()
+        .title("New OneNote Section")
+        .transient_for(parent_window)
+        .modal(true)
+        .resizable(false)
+        .default_width(560)
+        .build();
+    dialog.add_css_class("settings-dialog");
+
+    let content = dialog_content(16);
+    let heading = gtk::Label::builder()
+        .label("Create New Section (.one)")
+        .xalign(0.0)
+        .build();
+    heading.add_css_class("dialog-title");
+    content.append(&heading);
+
+    let desc = gtk::Label::builder()
+        .label("Creates a new OneNote section (.one file) inside the selected notebook folder.")
+        .xalign(0.0)
+        .wrap(true)
+        .build();
+    desc.add_css_class("dim-label");
+    content.append(&desc);
+
+    let name_label = gtk::Label::builder()
+        .label("Section Name:")
+        .xalign(0.0)
+        .build();
+    name_label.add_css_class("field-label");
+    content.append(&name_label);
+
+    let name_entry = gtk::Entry::builder()
+        .placeholder_text("e.g. Work Notes, Meeting Minutes, Ideas")
+        .text("New Section")
+        .build();
+    content.append(&name_entry);
+
+    let loc_label = gtk::Label::builder()
+        .label("Notebook Folder:")
+        .xalign(0.0)
+        .build();
+    loc_label.add_css_class("field-label");
+    content.append(&loc_label);
+
+    let location_box = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let path_lbl = path_label(Some(&default_location));
+    path_lbl.set_hexpand(true);
+    let browse_btn = gtk::Button::with_label("Browse...");
+    browse_btn.add_css_class("icon-button");
+    location_box.append(&path_lbl);
+    location_box.append(&browse_btn);
+    content.append(&location_box);
+
+    let actions_box = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    actions_box.set_halign(gtk::Align::End);
+    actions_box.set_margin_top(12);
+
+    let cancel = gtk::Button::with_label("Cancel");
+    cancel.add_css_class("icon-button");
+    let create = gtk::Button::with_label("Create Section");
+    create.add_css_class("suggested-action");
+    create.add_css_class("icon-button");
+    actions_box.append(&cancel);
+    actions_box.append(&create);
+    content.append(&actions_box);
+
+    let dialog_on_cancel = dialog.clone();
+    cancel.connect_clicked(move |_| dialog_on_cancel.close());
+
+    let dialog_for_chooser = dialog.clone();
+    let candidate_for_chooser = Rc::clone(&candidate_location);
+    let path_for_chooser = path_lbl.clone();
+    let error_for_chooser = Rc::clone(&on_error);
+    let default_for_chooser = default_location.clone();
+    browse_btn.connect_clicked(move |button| {
+        let candidate = Rc::clone(&candidate_for_chooser);
+        let path_lbl = path_for_chooser.clone();
+        let on_error = Rc::clone(&error_for_chooser);
+        let preferred = candidate.borrow().clone();
+        select_folder(
+            FolderDialogRequest {
+                owner: &dialog_for_chooser,
+                trigger: button,
+                title: "Choose notebook folder for new section",
+                accept_label: "Select Notebook",
+                preferred: &preferred,
+                fallback: &default_for_chooser,
+                error_title: "Could not select folder",
+            },
+            move |path| {
+                path_lbl.set_label(&path.display().to_string());
+                *candidate.borrow_mut() = path;
+            },
+            on_error,
+        );
+    });
+
+    let dialog_on_create = dialog.clone();
+    let candidate_for_create = Rc::clone(&candidate_location);
+    let name_for_create = name_entry.clone();
+    let error_for_create = Rc::clone(&on_error);
+    let create_action = Rc::new(move || {
+        let text = name_for_create.text().trim().to_string();
+        if text.is_empty() {
+            error_for_create("Invalid Section Name", "Please enter a valid section name.");
+            return;
+        }
+        if text.contains('/') || text.contains('\\') || text.contains('\0') {
+            error_for_create("Invalid Section Name", "Section name cannot contain '/', '\\', or null characters.");
+            return;
+        }
+        let folder = candidate_for_create.borrow().clone();
+        if on_create(&text, &folder) {
+            dialog_on_create.close();
+        }
+    });
+
+    let create_trigger = Rc::clone(&create_action);
+    create.connect_clicked(move |_| create_trigger());
+
+    let create_enter = Rc::clone(&create_action);
+    name_entry.connect_activate(move |_| create_enter());
+
+    dialog.set_child(Some(&content));
+    name_entry.grab_focus();
+    dialog.present();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
