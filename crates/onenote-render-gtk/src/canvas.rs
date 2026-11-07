@@ -10,6 +10,7 @@ use gtk::gdk;
 use gtk::gio;
 use gtk::glib;
 use gtk::graphene;
+use gtk::pango;
 use gtk::prelude::*;
 use gtk::subclass::prelude::*;
 use num_traits::ToPrimitive;
@@ -44,7 +45,7 @@ struct FindHighlights {
 
 mod imp {
     use super::{
-        f64_to_f32, gdk, glib, ActionHandler, Arc, Cell, Color, EditableStroke, FindHighlights, HashMap, HashSet,
+        gdk, glib, ActionHandler, Arc, Cell, Color, EditableStroke, FindHighlights, HashMap, HashSet,
         ImageDecodeFailure, InkEditDocument, InkEditHandler, InkEditTool, MathKey,
         MathLayoutBackend, OnceLock, PageScene, Rc, RefCell, ResolvedLayout, ResourceId,
         ResourceStore, SceneNodeId, TextSelectionHandler, TypstMathBackend, CANVAS_MARGIN,
@@ -83,6 +84,8 @@ mod imp {
         pub(super) ink_undo: RefCell<Vec<InkEditDocument>>,
         pub(super) ink_edit_handler: RefCell<Option<InkEditHandler>>,
         pub(super) selected_text_node: RefCell<Option<SceneNodeId>>,
+        pub(super) cursor_char_idx: Cell<usize>,
+        pub(super) cursor_blink_visible: Cell<bool>,
         pub(super) text_selection_handler: RefCell<Option<TextSelectionHandler>>,
         pub(super) drag_start: Cell<(f64, f64)>,
         pub(super) ink_drag_dirty: Cell<bool>,
@@ -123,6 +126,8 @@ mod imp {
                 ink_undo: RefCell::default(),
                 ink_edit_handler: RefCell::default(),
                 selected_text_node: RefCell::default(),
+                cursor_char_idx: Cell::new(0),
+                cursor_blink_visible: Cell::new(true),
                 text_selection_handler: RefCell::default(),
                 drag_start: Cell::new((0.0, 0.0)),
                 ink_drag_dirty: Cell::default(),
@@ -175,22 +180,9 @@ mod imp {
             let click = gtk::GestureClick::new();
             click.set_button(gdk::BUTTON_PRIMARY);
             let weak = object.downgrade();
-            click.connect_released(move |_, n_press, x, y| {
+            click.connect_released(move |_, _n_press, x, y| {
                 if let Some(object) = weak.upgrade() {
                     object.activate_at(x, y);
-                    if n_press >= 2 {
-                        if object.selected_text().is_some() {
-                            object.trigger_edit_on_selected();
-                        } else if let Some(scene) = object.scene() {
-                            let resolved = object.resolved_layout(&scene);
-                            let logical_x = f64_to_f32(x / f64::from(object.zoom())) + resolved.bounds.x - CANVAS_MARGIN;
-                            let logical_y = f64_to_f32(y / f64::from(object.zoom())) + resolved.bounds.y - CANVAS_MARGIN;
-                            let id = object.add_text_box_at(logical_x, logical_y, "Type your note here...");
-                            if let Some(handler) = object.imp().text_selection_handler.borrow().as_ref() {
-                                handler(id, "Type your note here...".to_string());
-                            }
-                        }
-                    }
                 }
             });
             object.add_controller(click);
@@ -236,21 +228,36 @@ mod imp {
             object.add_controller(motion);
             let keys = gtk::EventControllerKey::new();
             let weak = object.downgrade();
-            keys.connect_key_pressed(move |_, key, _, _| {
+            keys.connect_key_pressed(move |_, key, _, state| {
                 let Some(object) = weak.upgrade() else {
                     return glib::Propagation::Proceed;
                 };
-                if matches!(key, gdk::Key::Return | gdk::Key::KP_Enter | gdk::Key::space) {
+                if matches!(key, gdk::Key::Return | gdk::Key::KP_Enter | gdk::Key::space)
+                    && object.imp().selected_text_node.borrow().is_none()
+                {
                     if object.activate_focused_attachment() {
                         return glib::Propagation::Stop;
                     }
-                } else if key == gdk::Key::Escape {
+                } else if key == gdk::Key::Escape && object.imp().selected_text_node.borrow().is_none() {
                     object.imp().focused_attachment.set(None);
                     object.queue_draw();
                 }
-                glib::Propagation::Proceed
+                object.handle_key_pressed(key, state)
             });
             object.add_controller(keys);
+
+            let weak = object.downgrade();
+            glib::timeout_add_local(std::time::Duration::from_millis(530), move || {
+                let Some(object) = weak.upgrade() else {
+                    return glib::ControlFlow::Break;
+                };
+                if object.imp().selected_text_node.borrow().is_some() && object.has_focus() {
+                    let cur = object.imp().cursor_blink_visible.get();
+                    object.imp().cursor_blink_visible.set(!cur);
+                    object.queue_draw();
+                }
+                glib::ControlFlow::Continue
+            });
         }
     }
 
@@ -323,6 +330,8 @@ impl PageCanvas {
         *imp.scene.borrow_mut() = scene;
         *imp.ink_edits.borrow_mut() = InkEditDocument::default();
         *imp.selected_text_node.borrow_mut() = None;
+        imp.cursor_char_idx.set(0);
+        imp.cursor_blink_visible.set(true);
         imp.pending_ink.borrow_mut().take();
         imp.ink_undo.borrow_mut().clear();
         imp.hovered_attachment.borrow_mut().take();
@@ -406,22 +415,20 @@ impl PageCanvas {
 
     /// Add a new text box at page logical coordinates (x, y).
     pub fn add_text_box_at(&self, x: f32, y: f32, initial_text: &str) -> String {
-        let timestamp = glib::DateTime::now_local().map_or(0, |dt| dt.to_unix());
+        let timestamp = glib::DateTime::now_local().map_or(0, |dt| dt.to_unix() * 1_000_000 + dt.microsecond() as i64);
         let id = format!("textbox_{timestamp}");
         let new_box = EditableTextBox {
             id: id.clone(),
             x,
             y,
             width: 340.0,
-            height: 90.0,
-            text: if initial_text.is_empty() {
-                "Type your note here...".to_string()
-            } else {
-                initial_text.to_string()
-            },
+            height: 48.0,
+            text: initial_text.to_string(),
         };
         self.imp().ink_edits.borrow_mut().added_text_boxes.push(new_box);
         *self.imp().selected_text_node.borrow_mut() = Some(SceneNodeId(id.clone()));
+        self.imp().cursor_char_idx.set(initial_text.len());
+        self.imp().cursor_blink_visible.set(true);
         self.invalidate_text_geometry();
         self.queue_resize();
         self.queue_draw();
@@ -469,6 +476,14 @@ impl PageCanvas {
                 handler(node_id, text);
             }
         }
+    }
+
+    /// Select a text node and place cursor at a specific character offset.
+    pub fn select_node_by_id(&self, node_id: &str, cursor: usize) {
+        *self.imp().selected_text_node.borrow_mut() = Some(SceneNodeId(node_id.to_string()));
+        self.imp().cursor_char_idx.set(cursor);
+        self.imp().cursor_blink_visible.set(true);
+        self.queue_draw();
     }
 
     /// Toggle task checkbox on the currently selected text node if applicable.
@@ -809,7 +824,8 @@ impl PageCanvas {
         if self.imp().ink_tool.get() != InkEditTool::View {
             return;
         }
-        self.select_text_at(x, y);
+        self.grab_focus();
+        self.select_or_create_text_at(x, y);
         let action = self.action_at(x, y);
         if let Some(HitAction::OpenAttachment(resource_id)) = &action {
             self.focus_attachment(resource_id);
@@ -821,56 +837,63 @@ impl PageCanvas {
         }
     }
 
-    fn select_text_at(&self, x: f64, y: f64) {
-        let mut hit = self.scene().and_then(|scene| {
-            let resolved = self.resolved_layout(&scene);
-            let logical_x =
-                f64_to_f32(x / f64::from(self.zoom())) + resolved.bounds.x - CANVAS_MARGIN;
-            let logical_y =
-                f64_to_f32(y / f64::from(self.zoom())) + resolved.bounds.y - CANVAS_MARGIN;
-            scene.nodes.iter().rev().find_map(|node| {
-                let ScenePrimitive::Text { .. } = &node.primitive else {
-                    return None;
-                };
-                let bounds = resolved.node_bounds(node);
-                if contains(bounds, logical_x, logical_y) {
-                    Some((node.id.clone(), logical_x - bounds.x))
-                } else {
-                    None
-                }
-            })
+    fn select_or_create_text_at(&self, x: f64, y: f64) {
+        let Some(scene) = self.scene() else {
+            return;
+        };
+        let resolved = self.resolved_layout(&scene);
+        let logical_x =
+            f64_to_f32(x / f64::from(self.zoom())) + resolved.bounds.x - CANVAS_MARGIN;
+        let logical_y =
+            f64_to_f32(y / f64::from(self.zoom())) + resolved.bounds.y - CANVAS_MARGIN;
+
+        // Prune previous empty text box if the user clicked away without typing anything
+        {
+            let mut edits = self.imp().ink_edits.borrow_mut();
+            if let Some(prev) = self.imp().selected_text_node.borrow().as_ref() {
+                edits.added_text_boxes.retain(|tb| tb.id != prev.0 || !tb.text.trim().is_empty());
+            }
+        }
+
+        // Check scene text nodes
+        let mut hit: Option<(SceneNodeId, f32, f32)> = scene.nodes.iter().rev().find_map(|node| {
+            let ScenePrimitive::Text { .. } = &node.primitive else {
+                return None;
+            };
+            let bounds = resolved.node_bounds(node);
+            if contains(bounds, logical_x, logical_y) {
+                Some((node.id.clone(), logical_x - bounds.x, logical_y - bounds.y))
+            } else {
+                None
+            }
         });
 
+        // Check added text boxes
         if hit.is_none() {
-            if let Some(scene) = self.scene() {
-                let resolved = self.resolved_layout(&scene);
-                let logical_x =
-                    f64_to_f32(x / f64::from(self.zoom())) + resolved.bounds.x - CANVAS_MARGIN;
-                let logical_y =
-                    f64_to_f32(y / f64::from(self.zoom())) + resolved.bounds.y - CANVAS_MARGIN;
-                let edits = self.imp().ink_edits.borrow();
-                for tb in edits.added_text_boxes.iter().rev() {
-                    let bounds = Rect { x: tb.x, y: tb.y, width: tb.width, height: tb.height };
-                    if contains(bounds, logical_x, logical_y) {
-                        hit = Some((SceneNodeId(tb.id.clone()), logical_x - bounds.x));
-                        break;
-                    }
-                }
-                if hit.is_none() {
-                    for img in edits.added_images.iter().rev() {
-                        let bounds = Rect { x: img.x, y: img.y, width: img.width, height: img.height };
-                        if contains(bounds, logical_x, logical_y) {
-                            hit = Some((SceneNodeId(img.id.clone()), logical_x - bounds.x));
-                            break;
-                        }
-                    }
+            let edits = self.imp().ink_edits.borrow();
+            for tb in edits.added_text_boxes.iter().rev() {
+                let bounds = Rect { x: tb.x, y: tb.y, width: tb.width, height: tb.height };
+                if contains(bounds, logical_x, logical_y) {
+                    hit = Some((SceneNodeId(tb.id.clone()), logical_x - bounds.x, logical_y - bounds.y));
+                    break;
                 }
             }
         }
 
-        let mut changed = false;
-        if let Some((node_id, rel_x)) = hit {
-            // If clicked near checkbox (first 28px) on a task, toggle it immediately!
+        // Check added images
+        if hit.is_none() {
+            let edits = self.imp().ink_edits.borrow();
+            for img in edits.added_images.iter().rev() {
+                let bounds = Rect { x: img.x, y: img.y, width: img.width, height: img.height };
+                if contains(bounds, logical_x, logical_y) {
+                    hit = Some((SceneNodeId(img.id.clone()), logical_x - bounds.x, logical_y - bounds.y));
+                    break;
+                }
+            }
+        }
+
+        if let Some((node_id, rel_x, rel_y)) = hit {
+            // Checkbox toggle if clicked near left edge on to-do item
             if let Some(text) = self.text_for_node(&node_id) {
                 if rel_x < 28.0 && (text.starts_with("[ ] ") || text.starts_with("[x] ") || text.starts_with("[X] ") || text.starts_with("☐ ") || text.starts_with("☑ ")) {
                     let toggled = if text.starts_with("[ ] ") {
@@ -888,24 +911,220 @@ impl PageCanvas {
                 }
             }
 
-            if self.imp().selected_text_node.borrow().as_ref() != Some(&node_id) {
-                *self.imp().selected_text_node.borrow_mut() = Some(node_id.clone());
-                changed = true;
+            *self.imp().selected_text_node.borrow_mut() = Some(node_id.clone());
+
+            // Compute cursor character index using layout
+            if let Some(text) = self.text_for_node(&node_id) {
+                let layout = self.get_layout_for_node(&node_id, &text);
+                let (_, byte_idx, trailing) = layout.xy_to_index(text::to_pango_units(rel_x), text::to_pango_units(rel_y));
+                let mut cursor = if byte_idx >= 0 {
+                    let b = byte_idx as usize;
+                    if trailing > 0 && b < text.len() {
+                        text[b..].char_indices().nth(1).map(|(i, _)| b + i).unwrap_or(text.len())
+                    } else {
+                        b.min(text.len())
+                    }
+                } else {
+                    text.len()
+                };
+                while !text.is_char_boundary(cursor) && cursor > 0 {
+                    cursor -= 1;
+                }
+                self.imp().cursor_char_idx.set(cursor);
+            } else {
+                self.imp().cursor_char_idx.set(0);
             }
+            self.imp().cursor_blink_visible.set(true);
 
             if let Some(handler) = self.imp().text_selection_handler.borrow().as_ref() {
                 if let Some(text) = self.text_for_node(&node_id) {
                     handler(node_id.0.clone(), text);
                 }
             }
-        } else if self.imp().selected_text_node.borrow().is_some() {
-            *self.imp().selected_text_node.borrow_mut() = None;
-            changed = true;
+        } else {
+            // Clicked on empty canvas!
+            // In OneNote, clicking anywhere on blank paper creates a floating note container and places cursor there!
+            let new_id = self.add_text_box_at(logical_x, logical_y, "");
+            self.imp().cursor_char_idx.set(0);
+            self.imp().cursor_blink_visible.set(true);
+            if let Some(handler) = self.imp().text_selection_handler.borrow().as_ref() {
+                handler(new_id, String::new());
+            }
         }
 
-        if changed {
-            self.queue_draw();
+        self.queue_draw();
+    }
+
+    fn get_layout_for_node(&self, node_id: &SceneNodeId, text: &str) -> pango::Layout {
+        if let Some(scene) = self.scene() {
+            if let Some(node) = scene.nodes.iter().find(|n| &n.id == node_id) {
+                if let ScenePrimitive::Text { block, marker } = &node.primitive {
+                    return self.text_layout(node, block, marker.as_deref()).layout.clone();
+                }
+            }
         }
+        let default_style = onenote_core::TextStyle::default();
+        let (clean_text, base_style, runs) = Self::parse_formatted_text(&default_style, text);
+        let block = onenote_core::TextBlock {
+            text: clean_text,
+            base_style,
+            runs,
+            math: Vec::new(),
+            links: Vec::new(),
+            alignment: onenote_core::TextAlignment::Left,
+            space_before: 0.0,
+            space_after: 0.0,
+            line_spacing: None,
+        };
+        text::layout_with_math(&self.pango_context(), &block, None, 340.0, |_, _| None).layout
+    }
+
+    fn handle_key_pressed(&self, key: gdk::Key, state: gdk::ModifierType) -> glib::Propagation {
+        if self.imp().ink_tool.get() != InkEditTool::View {
+            return glib::Propagation::Proceed;
+        }
+        let Some(node_id) = self.imp().selected_text_node.borrow().clone() else {
+            return glib::Propagation::Proceed;
+        };
+
+        let Some(mut text) = self.text_for_node(&node_id) else {
+            return glib::Propagation::Proceed;
+        };
+
+        let mut cursor = self.imp().cursor_char_idx.get().min(text.len());
+        while !text.is_char_boundary(cursor) && cursor > 0 {
+            cursor -= 1;
+        }
+
+        match key {
+            gdk::Key::Escape => {
+                let is_empty = text.trim().is_empty();
+                if is_empty {
+                    self.imp().ink_edits.borrow_mut().added_text_boxes.retain(|tb| tb.id != node_id.0);
+                    self.emit_ink_edits_changed();
+                }
+                *self.imp().selected_text_node.borrow_mut() = None;
+                self.queue_draw();
+                return glib::Propagation::Stop;
+            }
+            gdk::Key::BackSpace => {
+                if cursor > 0 {
+                    let prev_idx = text[..cursor].char_indices().last().map(|(i, _)| i).unwrap_or(0);
+                    text.drain(prev_idx..cursor);
+                    cursor = prev_idx;
+                    self.update_node_text(&node_id, text, cursor);
+                }
+                return glib::Propagation::Stop;
+            }
+            gdk::Key::Delete => {
+                if cursor < text.len() {
+                    let next_idx = text[cursor..].char_indices().nth(1).map(|(i, _)| cursor + i).unwrap_or(text.len());
+                    text.drain(cursor..next_idx);
+                    self.update_node_text(&node_id, text, cursor);
+                }
+                return glib::Propagation::Stop;
+            }
+            gdk::Key::Left => {
+                if cursor > 0 {
+                    cursor = text[..cursor].char_indices().last().map(|(i, _)| i).unwrap_or(0);
+                    self.imp().cursor_char_idx.set(cursor);
+                    self.imp().cursor_blink_visible.set(true);
+                    self.queue_draw();
+                }
+                return glib::Propagation::Stop;
+            }
+            gdk::Key::Right => {
+                if cursor < text.len() {
+                    cursor = text[cursor..].char_indices().nth(1).map(|(i, _)| cursor + i).unwrap_or(text.len());
+                    self.imp().cursor_char_idx.set(cursor);
+                    self.imp().cursor_blink_visible.set(true);
+                    self.queue_draw();
+                }
+                return glib::Propagation::Stop;
+            }
+            gdk::Key::Home => {
+                let start_of_line = text[..cursor].rfind('\n').map(|i| i + 1).unwrap_or(0);
+                self.imp().cursor_char_idx.set(start_of_line);
+                self.imp().cursor_blink_visible.set(true);
+                self.queue_draw();
+                return glib::Propagation::Stop;
+            }
+            gdk::Key::End => {
+                let end_of_line = text[cursor..].find('\n').map(|i| cursor + i).unwrap_or(text.len());
+                self.imp().cursor_char_idx.set(end_of_line);
+                self.imp().cursor_blink_visible.set(true);
+                self.queue_draw();
+                return glib::Propagation::Stop;
+            }
+            gdk::Key::Up => {
+                let line_start = text[..cursor].rfind('\n').map(|i| i + 1).unwrap_or(0);
+                let col = cursor - line_start;
+                if line_start > 0 {
+                    let prev_line_start = text[..line_start - 1].rfind('\n').map(|i| i + 1).unwrap_or(0);
+                    let prev_line_len = (line_start - 1) - prev_line_start;
+                    cursor = prev_line_start + col.min(prev_line_len);
+                    while !text.is_char_boundary(cursor) && cursor > 0 {
+                        cursor -= 1;
+                    }
+                    self.imp().cursor_char_idx.set(cursor);
+                    self.imp().cursor_blink_visible.set(true);
+                    self.queue_draw();
+                }
+                return glib::Propagation::Stop;
+            }
+            gdk::Key::Down => {
+                if let Some(nl) = text[cursor..].find('\n').map(|i| cursor + i) {
+                    let line_start = text[..cursor].rfind('\n').map(|i| i + 1).unwrap_or(0);
+                    let col = cursor - line_start;
+                    let next_line_start = nl + 1;
+                    let next_line_len = text[next_line_start..].find('\n').unwrap_or_else(|| text.len() - next_line_start);
+                    cursor = next_line_start + col.min(next_line_len);
+                    while !text.is_char_boundary(cursor) && cursor > 0 {
+                        cursor -= 1;
+                    }
+                    self.imp().cursor_char_idx.set(cursor);
+                    self.imp().cursor_blink_visible.set(true);
+                    self.queue_draw();
+                }
+                return glib::Propagation::Stop;
+            }
+            gdk::Key::Tab => {
+                text.insert_str(cursor, "    ");
+                cursor += 4;
+                self.update_node_text(&node_id, text, cursor);
+                return glib::Propagation::Stop;
+            }
+            gdk::Key::Return | gdk::Key::KP_Enter => {
+                text.insert(cursor, '\n');
+                cursor += 1;
+                self.update_node_text(&node_id, text, cursor);
+                return glib::Propagation::Stop;
+            }
+            _ => {
+                if state.contains(gdk::ModifierType::CONTROL_MASK) || state.contains(gdk::ModifierType::ALT_MASK) {
+                    return glib::Propagation::Proceed;
+                }
+                if let Some(ch) = key.to_unicode() {
+                    if !ch.is_control() {
+                        text.insert(cursor, ch);
+                        cursor += ch.len_utf8();
+                        self.update_node_text(&node_id, text, cursor);
+                        return glib::Propagation::Stop;
+                    }
+                }
+            }
+        }
+        glib::Propagation::Proceed
+    }
+
+    fn update_node_text(&self, node_id: &SceneNodeId, text: String, cursor: usize) {
+        self.set_text_replacement(&node_id.0, text.clone());
+        self.imp().cursor_char_idx.set(cursor);
+        self.imp().cursor_blink_visible.set(true);
+        if let Some(handler) = self.imp().text_selection_handler.borrow().as_ref() {
+            handler(node_id.0.clone(), text);
+        }
+        self.queue_draw();
     }
 
     fn update_pointer_at(&self, x: f64, y: f64) {
@@ -926,7 +1145,7 @@ impl PageCanvas {
                 self.set_hovered_attachment(Some(resource_id));
             }
             Some(HitAction::SelectObject(_)) | None => {
-                self.set_cursor_from_name(None);
+                self.set_cursor_from_name(Some("text"));
                 self.set_tooltip_text(None);
                 self.set_hovered_attachment(None);
             }
@@ -1543,7 +1762,7 @@ pub fn parse_formatted_text(
             let default_style = onenote_core::TextStyle::default();
             let (clean_text, base_style, runs) = Self::parse_formatted_text(&default_style, &tb.text);
             let text_block = onenote_core::TextBlock {
-                text: clean_text,
+                text: clean_text.clone(),
                 base_style,
                 runs,
                 math: Vec::new(),
@@ -1566,7 +1785,8 @@ pub fn parse_formatted_text(
                 width: tb.width,
                 height: tb.height,
             };
-            if self.imp().selected_text_node.borrow().as_ref().map(|s| &s.0) == Some(&tb.id) {
+            let is_selected = self.imp().selected_text_node.borrow().as_ref().map(|s| &s.0) == Some(&tb.id);
+            if is_selected {
                 let pad = 4.0;
                 let cont_bounds = Rect {
                     x: bounds.x - pad,
@@ -1594,10 +1814,54 @@ pub fn parse_formatted_text(
                     &gdk::RGBA::new(0.46, 0.12, 0.65, 0.85),
                     &graphene_rect(handle_bounds),
                 );
+
+                if self.imp().cursor_blink_visible.get() {
+                    let cursor_byte = self.imp().cursor_char_idx.get().min(clean_text.len());
+                    let pos = layout.layout.index_to_pos(i32::try_from(cursor_byte).unwrap_or(0));
+                    let cur_x = bounds.x + text::from_pango_units(pos.x());
+                    let cur_y = bounds.y + text::from_pango_units(pos.y());
+                    let cur_h = text::from_pango_units(pos.height()).max(18.0);
+                    let cursor_rect = Rect {
+                        x: cur_x,
+                        y: cur_y,
+                        width: 2.0,
+                        height: cur_h,
+                    };
+                    snapshot.append_color(
+                        &gdk::RGBA::new(0.12, 0.12, 0.15, 1.0),
+                        &graphene_rect(cursor_rect),
+                    );
+                }
             }
             snapshot.save();
             snapshot.translate(&graphene::Point::new(tb.x, tb.y));
-            snapshot.append_layout(&layout.layout, &self.default_text_color());
+            if clean_text.is_empty() && is_selected {
+                let placeholder_block = onenote_core::TextBlock {
+                    text: "Type note here...".to_string(),
+                    base_style: {
+                        let mut s = onenote_core::TextStyle::default();
+                        s.foreground = Some(Color { red: 160, green: 160, blue: 160, alpha: 180 });
+                        s
+                    },
+                    runs: Vec::new(),
+                    math: Vec::new(),
+                    links: Vec::new(),
+                    alignment: onenote_core::TextAlignment::Left,
+                    space_before: 0.0,
+                    space_after: 0.0,
+                    line_spacing: None,
+                };
+                let pl_layout = text::layout_with_math(
+                    &self.pango_context(),
+                    &placeholder_block,
+                    None,
+                    tb.width,
+                    |_, _| None,
+                );
+                snapshot.append_layout(&pl_layout.layout, &gdk::RGBA::new(0.65, 0.65, 0.65, 0.6));
+            } else {
+                snapshot.append_layout(&layout.layout, &self.default_text_color());
+            }
             snapshot.restore();
         }
 
@@ -1646,7 +1910,8 @@ pub fn parse_formatted_text(
                 corner_radius: _,
             } => snapshot.append_color(&rgba(*color), &graphene_rect(node_bounds)),
             ScenePrimitive::Text { block, marker } => {
-                if self.imp().selected_text_node.borrow().as_ref() == Some(&node.id) {
+                let is_selected = self.imp().selected_text_node.borrow().as_ref() == Some(&node.id);
+                if is_selected {
                     let pad = 4.0;
                     let cont_bounds = Rect {
                         x: node_bounds.x - pad,
@@ -1676,6 +1941,24 @@ pub fn parse_formatted_text(
                     );
                 }
                 let layout = self.text_layout(node, block, marker.as_deref());
+                if is_selected && self.imp().cursor_blink_visible.get() {
+                    let current_text = self.text_for_node(&node.id).unwrap_or_else(|| block.visible_text());
+                    let cursor_byte = self.imp().cursor_char_idx.get().min(current_text.len());
+                    let pos = layout.layout.index_to_pos(i32::try_from(cursor_byte).unwrap_or(0));
+                    let cur_x = node_bounds.x + text::from_pango_units(pos.x());
+                    let cur_y = node_bounds.y + text::from_pango_units(pos.y());
+                    let cur_h = text::from_pango_units(pos.height()).max(18.0);
+                    let cursor_rect = Rect {
+                        x: cur_x,
+                        y: cur_y,
+                        width: 2.0,
+                        height: cur_h,
+                    };
+                    snapshot.append_color(
+                        &gdk::RGBA::new(0.12, 0.12, 0.15, 1.0),
+                        &graphene_rect(cursor_rect),
+                    );
+                }
                 snapshot.save();
                 snapshot.translate(&graphene::Point::new(node_bounds.x, node_bounds.y));
                 snapshot.append_layout(&layout.layout, &self.default_text_color());

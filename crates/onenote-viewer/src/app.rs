@@ -18,7 +18,7 @@ use onenote_core::{
     ResourceId, ResourceRef, SectionId, SourceDescriptor, SourceId,
 };
 use onenote_index::{IndexProfile, IndexUpdate, MatchedField, SearchHit, SearchQuery, TextRange};
-use onenote_render::{HitAction, ScenePrimitive};
+use onenote_render::{HitAction, PageScene, ScenePrimitive};
 use onenote_render_gtk::{
     find_text_ranges, FindMatch, FindOptions, FindTextRange, InkEditTool, PageView, DEFAULT_ZOOM,
 };
@@ -889,6 +889,7 @@ impl Viewer {
         brand.add_css_class("brand");
 
         let file_menu = gio::Menu::new();
+        file_menu.append(Some("📄 New Page (Ctrl+N)"), Some("win.new-page"));
         file_menu.append(Some("Open OneNote File..."), Some("win.open-file"));
         file_menu.append(Some("Open Notebook Folder..."), Some("win.open-folder"));
         file_menu.append(
@@ -947,11 +948,14 @@ impl Viewer {
             Some(&close_source),
             restored_panes.notebooks_collapsed,
         );
+        let add_page_btn = icon_button("list-add-symbolic", "Add New Page (Ctrl+N)");
+        add_page_btn.set_action_name(Some("win.new-page"));
+        add_page_btn.add_css_class("flat");
         let pages = CollapsibleNavigationBand::new(
             "PAGES",
             &page_list,
             PAGE_NAVIGATION_WIDTH,
-            None,
+            Some(&add_page_btn),
             restored_panes.pages_collapsed,
         );
         let results = navigation_band("SEARCH RESULTS", &result_list, SEARCH_RESULTS_WIDTH);
@@ -1305,6 +1309,14 @@ impl Viewer {
             });
         }
         viewer.window.add_action(&open_file);
+        let new_page_action = gio::SimpleAction::new("new-page", None);
+        let weak_new_page = Rc::downgrade(&viewer);
+        new_page_action.connect_activate(move |_, _| {
+            if let Some(viewer) = weak_new_page.upgrade() {
+                viewer.create_new_page();
+            }
+        });
+        viewer.window.add_action(&new_page_action);
         viewer.window.add_action(&open_folder);
         viewer.window.add_action(&open_backup_folder);
         viewer.window.add_action(&import_package);
@@ -1320,6 +1332,7 @@ impl Viewer {
         viewer.window.add_action(&page_find_next_action);
         viewer.window.add_action(&page_find_previous_action);
         application.set_accels_for_action("win.open-file", &["<Primary>o"]);
+        application.set_accels_for_action("win.new-page", &["<Primary>n"]);
         application.set_accels_for_action("win.open-folder", &["<Primary><Shift>o"]);
         application.set_accels_for_action("win.import-package", &["<Primary><Shift>i"]);
         application.set_accels_for_action("win.settings", &["<Primary>comma"]);
@@ -1811,9 +1824,16 @@ impl Viewer {
         let weak = Rc::downgrade(self);
         self.page_view
             .canvas()
-            .set_text_selection_handler(Some(move |node_id, text| {
+            .set_text_selection_handler(Some(move |node_id: String, text: String| {
                 if let Some(viewer) = weak.upgrade() {
-                    viewer.word_editor.load_text(node_id, text);
+                    viewer.word_editor.load_text(node_id.clone(), text.clone());
+                    if node_id.ends_with("_title") {
+                        viewer.page_title.set_label(&text);
+                        let selected = viewer.page_selection.selected();
+                        if selected != NO_SELECTION {
+                            viewer.page_model.splice(selected, 1, &[&gtk_text(&text)]);
+                        }
+                    }
                 }
             }));
 
@@ -1838,11 +1858,18 @@ impl Viewer {
                     viewer
                         .page_view
                         .canvas()
-                        .set_text_replacement(&node_id, text);
+                        .set_text_replacement(&node_id, text.clone());
                     viewer
                         .word_editor
                         .status_label
                         .set_label("● Saved live to page");
+                    if node_id.ends_with("_title") {
+                        viewer.page_title.set_label(&text);
+                        let selected = viewer.page_selection.selected();
+                        if selected != NO_SELECTION {
+                            viewer.page_model.splice(selected, 1, &[&gtk_text(&text)]);
+                        }
+                    }
                 }
             });
     }
@@ -1852,24 +1879,85 @@ impl Viewer {
         self.word_editor.load_text(node_id, text);
     }
 
+    pub fn create_new_page(self: &Rc<Self>) {
+        let timestamp = glib::DateTime::now_local().map_or(0, |dt| dt.to_unix() * 1_000_000 + dt.microsecond() as i64);
+        let page_id = PageId::new(format!("page_{timestamp}"));
+        let active = self.state.borrow().active.clone();
+        let (source_id, section_id) = if let Some(active) = active {
+            if let Some(sec) = active.section {
+                (active.source, sec.section_id)
+            } else {
+                (active.source, SectionId::new("default_section".to_string()))
+            }
+        } else {
+            (SourceId::new("local_notebook".to_string()), SectionId::new("quick_notes".to_string()))
+        };
+
+        let new_row = PageRow {
+            source: source_id.clone(),
+            section: section_id.clone(),
+            page: page_id.clone(),
+        };
+        self.state.borrow_mut().pages.push(new_row);
+
+        append_model(&self.page_model, "Untitled Page");
+        let new_idx = self.page_model.n_items() - 1;
+        self.selection_syncing.set(true);
+        self.page_selection.set_selected(new_idx);
+        self.selection_syncing.set(false);
+
+        self.state.borrow_mut().active = Some(ActiveLocation {
+            source: source_id,
+            section: Some(SectionLocation {
+                section_id,
+                page_id: Some(page_id.clone()),
+            }),
+        });
+
+        let blank_scene = Arc::new(PageScene::new_blank(page_id.clone(), "Untitled Page"));
+        self.page_view.set_scene(Some(blank_scene));
+        self.canvas_stack.set_visible_child_name("document");
+        self.page_title.set_label("Untitled Page");
+        let now_str = glib::DateTime::now_local()
+            .map(|dt| dt.format("%A, %B %e, %Y  %l:%M %P").unwrap_or_default().to_string())
+            .unwrap_or_default();
+        self.page_date.set_label(&now_str);
+        self.status.set_label("New page created · Click anywhere to type notes");
+
+        let title_node_id = format!("node_{}_title", page_id.as_str());
+        self.page_view.canvas().select_node_by_id(&title_node_id, "Untitled Page".len());
+        self.page_view.canvas().grab_focus();
+        self.word_editor.load_text(title_node_id, "Untitled Page".to_string());
+    }
+
     fn active_ink_edit_key(&self) -> Option<String> {
         let scene = self.page_view.canvas().scene()?;
         self.ink_edit_key_for_page(&scene.page_id)
     }
 
     fn ink_edit_key_for_page(&self, page_id: &PageId) -> Option<String> {
-        let selected = usize::try_from(self.page_selection.selected()).ok()?;
+        let selected = usize::try_from(self.page_selection.selected()).ok();
         let state = self.state.borrow();
-        let row = state.pages.get(selected)?;
-        let source = state
-            .sources
-            .iter()
-            .find(|source| source.loaded.notebook.source_id == row.source)?;
-        Some(crate::ink_edits::page_key(
-            source.loaded.notebook.source_id.as_str(),
-            source.loaded.notebook.fingerprint.as_str(),
-            page_id.as_str(),
-        ))
+        let row = selected.and_then(|idx| state.pages.get(idx));
+        let source = row.and_then(|row| {
+            state
+                .sources
+                .iter()
+                .find(|source| source.loaded.notebook.source_id == row.source)
+        });
+        if let Some(source) = source {
+            Some(crate::ink_edits::page_key(
+                source.loaded.notebook.source_id.as_str(),
+                source.loaded.notebook.fingerprint.as_str(),
+                page_id.as_str(),
+            ))
+        } else {
+            Some(crate::ink_edits::page_key(
+                "local_user",
+                "local_notebook",
+                page_id.as_str(),
+            ))
+        }
     }
 
     fn connect_page_actions(self: &Rc<Self>) {
@@ -5116,6 +5204,14 @@ fn build_ribbon_toolbar(
     let home_box = gtk::Box::new(gtk::Orientation::Horizontal, 4);
     home_box.add_css_class("ribbon-toolbar");
 
+    let new_page_btn = gtk::Button::with_label("📄 New Page");
+    new_page_btn.add_css_class("ribbon-btn");
+    new_page_btn.add_css_class("word-tb-btn-primary");
+    new_page_btn.set_tooltip_text(Some("Create a new blank page (Ctrl+N)"));
+    new_page_btn.set_action_name(Some("win.new-page"));
+    home_box.append(&new_page_btn);
+    home_box.append(&ribbon_separator());
+
     let find_btn = gtk::Button::with_label("🔍 Find");
     find_btn.add_css_class("ribbon-btn");
     {
@@ -5440,6 +5536,14 @@ fn build_ribbon_toolbar(
     // 3. Insert ribbon
     let insert_box = gtk::Box::new(gtk::Orientation::Horizontal, 6);
     insert_box.add_css_class("ribbon-toolbar");
+
+    let ins_new_page_btn = gtk::Button::with_label("📄 New Page");
+    ins_new_page_btn.add_css_class("ribbon-btn");
+    ins_new_page_btn.add_css_class("word-tb-btn-primary");
+    ins_new_page_btn.set_tooltip_text(Some("Insert a new blank page (Ctrl+N)"));
+    ins_new_page_btn.set_action_name(Some("win.new-page"));
+    insert_box.append(&ins_new_page_btn);
+    insert_box.append(&ribbon_separator());
 
     let ins_text_btn = gtk::Button::with_label("➕ Insert Text Box");
     ins_text_btn.add_css_class("ribbon-btn");
